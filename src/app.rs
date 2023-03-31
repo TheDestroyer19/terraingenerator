@@ -1,21 +1,60 @@
+use std::collections::{VecDeque, HashSet};
+
+use egui::{Color32, Vec2, ColorImage};
+use egui_extras::RetainedImage;
+
+use crate::{map::{Map, Pos}, noise::simplex2d_octaves};
+
+#[derive(serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+enum View {
+    Elevation,
+    StandingWater,
+    Composite,
+}
+
 /// We derive Deserialize/Serialize so we can persist app state on shutdown.
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(default)] // if we add new fields, give them default values when deserializing old state
 pub struct TemplateApp {
-    // Example stuff:
-    label: String,
+    view: View,
+    size: usize,
+    //elevation noise inputs
+    seed: i64,
+    frequency: f64,
+    amplitude: f32,
+    octaves: u32,
+    persistance: f32,
+    //standing water inputs
+    ocean_level: f32,
 
     // this how you opt-out of serialization of a member
     #[serde(skip)]
-    value: f32,
+    elevation: Map<f32>,
+    #[serde(skip)]
+    standing_water: Map<f32>,
+    #[serde(skip)]
+    image: RetainedImage,
 }
 
 impl Default for TemplateApp {
     fn default() -> Self {
+        let size = 128;
+        let elevation = Map::<f32>::new(size);
+        let standing_water = Map::<f32>::new(size);
+        let color_image = ColorImage::new([size, size], Color32::default());
+
         Self {
-            // Example stuff:
-            label: "Hello World!".to_owned(),
-            value: 2.7,
+            view: View::Composite,
+            seed: 12345,
+            size,
+            frequency: 16.0,
+            amplitude: 256.0,
+            octaves: 6,
+            persistance: 0.8,
+            ocean_level: 32.0,
+            elevation,
+            standing_water,
+            image: RetainedImage::from_color_image("display", color_image),
         }
     }
 }
@@ -29,10 +68,109 @@ impl TemplateApp {
         // Load previous app state (if any).
         // Note that you must enable the `persistence` feature for this to work.
         if let Some(storage) = cc.storage {
-            return eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
+            let mut loaded: Self = eframe::get_value(storage, eframe::APP_KEY).unwrap_or_default();
+            loaded.generate();
+
+            return loaded;
         }
 
         Default::default()
+    }
+
+    fn generate(&mut self) {
+        let generator = simplex2d_octaves(
+            self.seed,
+            self.size,
+            self.frequency,
+            self.amplitude,
+            self.octaves,
+            self.persistance,
+        );
+        self.elevation = Map::with_generator(self.size, generator);
+
+        //multistep process to fill in lakes
+        //first off start by setting the standing water to a 'max lake depth'
+        self.standing_water = Map::with_generator(self.size, |x, y| {
+            if x == 0 || y == 0 || x + 1 == self.size || y + 1 == self.size {
+                self.ocean_level
+            } else {
+                self.amplitude
+            }
+        });
+
+        //now gather up the edges
+        let mut queue = VecDeque::with_capacity(self.size * 4);
+        queue.extend((0..self.size).map(|i| Pos::new(i, 0)));
+        queue.extend((0..self.size).map(|i| Pos::new(i, self.size - 1)));
+        queue.extend((0..self.size).map(|i| Pos::new(0, i)));
+        queue.extend((0..self.size).map(|i| Pos::new(self.size - 1, i)));
+
+        //and we start working in from them removing water that would 'run off the map'
+        while let Some(pos) = queue.pop_front() {
+            let elevation = *self.elevation.get(pos);
+            let water_level = *self.standing_water.get(pos);
+            let drainage_level = elevation.max(water_level);
+
+            let neighbors = pos.neighbors(self.size, self.size);
+            for neighbor in neighbors {
+                let nwl = *self.standing_water.get(neighbor);
+
+                if nwl > drainage_level {
+                    self.standing_water.set(neighbor, drainage_level);
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+
+        //remove any cells where the water level is below the elevation
+        for y in 0..self.size {
+            for x in 0..self.size {
+                let pos = Pos::new(x, y);
+                let e = *self.elevation.get(pos);
+                let wl = *self.standing_water.get(pos);
+                if wl < e {
+                    self.standing_water.set(pos, 0.0);
+                } else {
+                    self.standing_water.set(pos, wl - e);
+                }
+
+            }
+        }
+
+        self.update_display();
+    }
+
+    fn update_display(&mut self) {
+        let elevation_func = |&v| Color32::from_gray(v as u8);
+        let water_func = |&v| {
+            let v = (v as f32 * 4.0).min(255.0) as u8;
+            let iv = 255 - v;
+            Color32::from_rgb(iv, iv, 255)
+        };
+        assert_eq!(self.size, self.elevation.size());
+        assert_eq!(self.size, self.standing_water.size());
+
+        let size = [self.size, self.size];
+        let pixels: Vec<Color32> = match self.view {
+            View::Elevation => self.elevation.values().map(elevation_func).collect(),
+            View::StandingWater => self.standing_water.values()
+                .map(water_func).collect(),
+            View::Composite => self.elevation.values().zip(self.standing_water.values())
+                .map(|(&e, &w)| {
+                    let gray = e as u8;
+                    let blue = (w * 4.0) as u8;
+                    Color32::from_rgb(gray, gray, gray.saturating_add(blue))
+                }).collect(),
+        };
+
+        assert_eq!(self.size * self.size, pixels.len());
+
+        let color_image = ColorImage {
+            size,
+            pixels,
+        };
+
+        self.image = RetainedImage::from_color_image("preview", color_image);
     }
 }
 
@@ -45,8 +183,6 @@ impl eframe::App for TemplateApp {
     /// Called each time the UI needs repainting, which may be many times per second.
     /// Put your widgets into a `SidePanel`, `TopPanel`, `CentralPanel`, `Window` or `Area`.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let Self { label, value } = self;
-
         // Examples of how to create different panels and windows.
         // Pick whichever suits you.
         // Tip: a good default choice is to just keep the `CentralPanel`.
@@ -65,52 +201,69 @@ impl eframe::App for TemplateApp {
         });
 
         egui::SidePanel::left("side_panel").show(ctx, |ui| {
-            ui.heading("Side Panel");
-
-            ui.horizontal(|ui| {
-                ui.label("Write something: ");
-                ui.text_edit_singleline(label);
+            ui.heading("Settings");
+            egui::Grid::new("settings").num_columns(2).show(ui, |ui| {
+                ui.label("Seed");
+                ui.add(egui::DragValue::new(&mut self.seed));
+                ui.end_row();
+                ui.label("size");
+                ui.add(egui::DragValue::new(&mut self.size).clamp_range(16..=2048));
+                ui.end_row();
             });
-
-            ui.add(egui::Slider::new(value, 0.0..=10.0).text("value"));
-            if ui.button("Increment").clicked() {
-                *value += 1.0;
-            }
-
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    ui.label("powered by ");
-                    ui.hyperlink_to("egui", "https://github.com/emilk/egui");
-                    ui.label(" and ");
-                    ui.hyperlink_to(
-                        "eframe",
-                        "https://github.com/emilk/egui/tree/master/crates/eframe",
+            ui.separator();
+            ui.heading("Elevation settings");
+            egui::Grid::new("settings-elevation")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    ui.label("frequency");
+                    ui.add(egui::DragValue::new(&mut self.frequency));
+                    ui.end_row();
+                    ui.label("amplitude");
+                    ui.add(egui::DragValue::new(&mut self.amplitude).clamp_range(0.0..=256.0));
+                    ui.end_row();
+                    ui.label("octaves");
+                    ui.add(egui::DragValue::new(&mut self.octaves).clamp_range(0..=16));
+                    ui.end_row();
+                    ui.label("persistance");
+                    ui.add(
+                        egui::DragValue::new(&mut self.persistance)
+                            .clamp_range(0.0..=1.0)
+                            .speed(0.05),
                     );
-                    ui.label(".");
+                    ui.end_row();
                 });
+            ui.separator();
+            ui.heading("Water settings");
+            egui::Grid::new("settings-water")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("Ocean level");
+                ui.add(egui::DragValue::new(&mut self.ocean_level));
+                ui.end_row();
             });
+            if ui.button("Generate").clicked() {
+                self.generate();
+            }
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // The central panel the region left after adding TopPanel's and SidePanel's
+            ui.horizontal(|ui| {
+                if ui.selectable_label(self.view == View::Elevation, "Elevation").clicked() {
+                    self.view = View::Elevation;
+                    self.update_display();
+                }
+                if ui.selectable_label(self.view == View::StandingWater, "Water").clicked() {
+                    self.view = View::StandingWater;
+                    self.update_display();
+                }
+                if ui.selectable_label(self.view == View::Composite, "Composite").clicked() {
+                    self.view = View::Composite;
+                    self.update_display();
+                }
+            });
+            ui.image(self.image.texture_id(ctx), Vec2::new(512., 512.));
 
-            ui.heading("eframe template");
-            ui.hyperlink("https://github.com/emilk/eframe_template");
-            ui.add(egui::github_link_file!(
-                "https://github.com/emilk/eframe_template/blob/master/",
-                "Source code."
-            ));
             egui::warn_if_debug_build(ui);
         });
-
-        if false {
-            egui::Window::new("Window").show(ctx, |ui| {
-                ui.label("Windows can be moved by dragging them.");
-                ui.label("They are automatically sized based on contents.");
-                ui.label("You can turn on resizing and scrolling if you like.");
-                ui.label("You would normally choose either panels OR windows.");
-            });
-        }
     }
 }
