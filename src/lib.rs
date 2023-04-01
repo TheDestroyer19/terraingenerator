@@ -3,4 +3,5 @@
 mod app;
 mod map;
 mod noise;
+mod water;
 pub use app::TemplateApp;

@@ -1,9 +1,7 @@
-use std::collections::{VecDeque, HashSet};
-
 use egui::{Color32, Vec2, ColorImage};
 use egui_extras::RetainedImage;
 
-use crate::{map::{Map, Pos}, noise::simplex2d_octaves};
+use crate::{map::Map, noise::simplex2d_octaves};
 
 #[derive(serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 enum View {
@@ -88,54 +86,7 @@ impl TemplateApp {
         );
         self.elevation = Map::with_generator(self.size, generator);
 
-        //multistep process to fill in lakes
-        //first off start by setting the standing water to a 'max lake depth'
-        self.standing_water = Map::with_generator(self.size, |x, y| {
-            if x == 0 || y == 0 || x + 1 == self.size || y + 1 == self.size {
-                self.ocean_level
-            } else {
-                self.amplitude
-            }
-        });
-
-        //now gather up the edges
-        let mut queue = VecDeque::with_capacity(self.size * 4);
-        queue.extend((0..self.size).map(|i| Pos::new(i, 0)));
-        queue.extend((0..self.size).map(|i| Pos::new(i, self.size - 1)));
-        queue.extend((0..self.size).map(|i| Pos::new(0, i)));
-        queue.extend((0..self.size).map(|i| Pos::new(self.size - 1, i)));
-
-        //and we start working in from them removing water that would 'run off the map'
-        while let Some(pos) = queue.pop_front() {
-            let elevation = *self.elevation.get(pos);
-            let water_level = *self.standing_water.get(pos);
-            let drainage_level = elevation.max(water_level);
-
-            let neighbors = pos.neighbors(self.size, self.size);
-            for neighbor in neighbors {
-                let nwl = *self.standing_water.get(neighbor);
-
-                if nwl > drainage_level {
-                    self.standing_water.set(neighbor, drainage_level);
-                    queue.push_back(neighbor);
-                }
-            }
-        }
-
-        //remove any cells where the water level is below the elevation
-        for y in 0..self.size {
-            for x in 0..self.size {
-                let pos = Pos::new(x, y);
-                let e = *self.elevation.get(pos);
-                let wl = *self.standing_water.get(pos);
-                if wl < e {
-                    self.standing_water.set(pos, 0.0);
-                } else {
-                    self.standing_water.set(pos, wl - e);
-                }
-
-            }
-        }
+        crate::water::calculate_lakes(&self.elevation, &mut self.standing_water, self.ocean_level);
 
         self.update_display();
     }

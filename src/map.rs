@@ -8,16 +8,16 @@ where
     T: Default,
 {
     pub(crate) fn new(size: usize) -> Self {
-        Self::with_generator(size, |_, _| Default::default())
+        Self::with_generator(size, |_| Default::default())
     }
 }
 
 impl<T> Map<T> {
-    pub(crate) fn with_generator(size: usize, mut gen: impl FnMut(usize, usize) -> T) -> Self {
+    pub(crate) fn with_generator(size: usize, mut gen: impl FnMut(Pos) -> T) -> Self {
         let mut values = Vec::with_capacity(size * size);
         for y in 0..size {
             for x in 0..size {
-                values.push(gen(x, y));
+                values.push(gen((x, y).into()));
             }
         }
 
@@ -26,10 +26,6 @@ impl<T> Map<T> {
 
     pub(crate) fn size(&self) -> usize {
         self.size
-    }
-
-    pub(crate) fn get_xy(&self, x: usize, y: usize) -> &T {
-        self.get((x, y))
     }
 
     pub(crate) fn get(&self, pos: impl Into<Pos>) -> &T {
@@ -44,10 +40,11 @@ impl<T> Map<T> {
         self.values[idx] = v;
     }
 
-    pub(crate) fn map(&mut self, mut mapper: impl FnMut(&T) -> T) {
-        for v in &mut self.values {
-            *v = mapper(v);
-        }
+    pub(crate) fn map(&mut self, mut mapper: impl FnMut(Pos, &T) -> T) {
+        self.values.iter_mut().enumerate().for_each(|(idx, v)| {
+            let pos = idx_pos(self.size, idx);
+            *v = mapper(pos, v);
+        });
     }
 
     pub(crate) fn values(&self) -> impl Iterator<Item = &T> {
@@ -57,6 +54,12 @@ impl<T> Map<T> {
     fn idx(&self, pos: Pos) -> usize {
         pos.y * self.size + pos.x
     }
+}
+
+fn idx_pos(size: usize, idx: usize) -> Pos {
+    let x = idx % size;
+    let y = idx / size;
+    Pos::new(x, y)
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
