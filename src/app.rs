@@ -1,7 +1,7 @@
 use egui::{Color32, Vec2, ColorImage};
 use egui_extras::RetainedImage;
 
-use crate::{map::Map, noise::simplex2d_octaves};
+use crate::{map::{Map, Pos}, noise::simplex2d_octaves};
 
 #[derive(serde::Deserialize, serde::Serialize, PartialEq, Eq)]
 enum View {
@@ -94,7 +94,7 @@ impl TemplateApp {
     fn update_display(&mut self) {
         let elevation_func = |&v| Color32::from_gray(v as u8);
         let water_func = |&v| {
-            let v = (v as f32 * 4.0).min(255.0) as u8;
+            let v = (v as f32).min(255.0) as u8;
             let iv = 255 - v;
             Color32::from_rgb(iv, iv, 255)
         };
@@ -195,6 +195,7 @@ impl eframe::App for TemplateApp {
             if ui.button("Generate").clicked() {
                 self.generate();
             }
+            egui::warn_if_debug_build(ui);
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -212,9 +213,23 @@ impl eframe::App for TemplateApp {
                     self.update_display();
                 }
             });
-            ui.image(self.image.texture_id(ctx), Vec2::new(512., 512.));
 
-            egui::warn_if_debug_build(ui);
+            let available = ui.available_rect_before_wrap();
+            let size = Vec2::splat(available.size().min_elem());
+            let response = ui.image(self.image.texture_id(ctx), size);
+            let pos = response.hover_pos().map(|mp| mp - available.left_top());
+
+            if let Some(pos) = pos {
+                response.on_hover_ui_at_pointer(|ui| {
+                    let pos = (pos / size.x) * self.size as f32;
+                    let pos = pos.clamp(Vec2::ZERO, Vec2::splat(self.size as f32 - 0.01)).floor();
+                    ui.label(format!("({}, {})", pos.x, pos.y));
+                    let pos: Pos = (pos.x as usize, pos.y as usize).into();
+                    ui.label(format!("Elevation: {:.1}", *self.elevation.get(pos)));
+                    ui.label(format!("Standing Water Depth: {:.1}", *self.standing_water.get(pos)));
+                });
+            }
+                
         });
     }
 }
